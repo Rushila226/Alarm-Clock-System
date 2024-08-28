@@ -1,0 +1,173 @@
+#!/bin/bash
+
+DATA_FILE="calendar_data.txt"
+set_alarm_gui() {
+    alarm_date_time=$(zenity --forms --title="Set Alarm" \
+                    --text="Enter alarm date and time:" \
+                    --add-combo="Select day:" --combo-values="Today|Tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday" \
+                    --add-entry="Time (HH:MM):")
+    echo "$alarm_date_time"
+}
+
+alarm_notification() {
+    paplay /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga &
+    alarm_dialog=$(zenity --info --title="Alarm" --text="Alarm! It's time to wake up!" --ok-label="Dismiss" --extra-button="Snooze" --timeout=60)
+    response=$?
+    if [ $response -eq 0 ]; then
+        exit 0
+    elif [ $response -eq 1 ]; then         
+        sleep 60
+        alarm_notification
+    else
+        # Timeout occurred
+        exit 0
+    fi
+}
+
+extract_day_hours_and_minutes() {
+    local alarm_date_time=$1
+
+    local alarm_day=$(echo "$alarm_date_time" | cut -d'|' -f 1)
+    local alarm_time=$(echo "$alarm_date_time" | cut -d'|' -f 2)
+    local alarm_hour=$(echo "$alarm_time" | cut -d ':' -f 1)
+    local alarm_minute=$(echo "$alarm_time" | cut -d ':' -f 2)
+    echo "$alarm_day" "$alarm_hour" "$alarm_minute"
+}
+
+calculate_total_seconds() {
+    local alarm_day=$1
+    local alarm_hour=$2
+    local alarm_minute=$3
+    local current_day=$(date +%A)
+    local current_hour=$(date +%H)
+    local current_minute=$(date +%M)
+
+    seconds_until_day=$((($(date +%u -d "$alarm_day") - $(date +%u)) * 24 * 3600))
+    seconds_until_time=$((($(date -d "$alarm_day $alarm_hour:$alarm_minute" +%s) - $(date +%s) + seconds_until_day) % (7 * 24 * 3600)))
+
+    if [ $seconds_until_time -lt 0 ]; then
+        seconds_until_time=$((seconds_until_time + 7 * 24 * 3600))
+    fi
+
+    echo "$seconds_until_time"
+}
+set_alarm() {
+    alarm_date_time=$(set_alarm_gui)
+
+    if [ -z "$alarm_date_time" ]; then
+        echo "No alarm date and time set. Exiting."
+        exit 1
+    fi
+    read -r alarm_day alarm_hour alarm_minute <<< "$(extract_day_hours_and_minutes "$alarm_date_time")"
+    total_seconds=$(calculate_total_seconds "$alarm_day" "$alarm_hour" "$alarm_minute")
+
+    echo "Alarm set for $((total_seconds / 3600 / 24)) days, $(((total_seconds / 3600) % 24)) hours, and $(((total_seconds % 3600) / 60)) minutes from now."
+    # Save the alarm data to the data file
+    echo "$alarm_day $alarm_hour:$alarm_minute" >> "$DATA_FILE"
+    # Run set_alarm function in the background
+    (sleep "$total_seconds" && alarm_notification) &
+}
+display_events() {
+    selected_date=$(zenity --calendar --title="View Events" --text="Select a date to view events:" --date-format="%Y-%m-%d" --width=300 --height=300)
+    if [ -z "$selected_date" ]; then
+        zenity --info --title="No Date Selected" --text="No date selected. Exiting."
+        exit 1
+    fi
+    echo "Selected Date: $selected_date"
+    converted_date=$(date -d "$selected_date" +"%m/%d/%y")
+    today=$(date +"%Y-%m-%d")
+    if [ "$selected_date" = "$today" ]; then
+        events=$(grep "$converted_date" "$DATA_FILE" | cut -d '-' -f2-)
+        if [ -z "$events" ]; then
+            zenity --info --title="No Events" --text="No events for today."
+        else
+            zenity --info --title="Events for Today" --text="Events for today:\n$events"
+        fi
+    else
+        events=$(grep "$converted_date" "$DATA_FILE" | cut -d '-' -f2-)
+        if [ -z "$events" ]; then
+            zenity --info --title="No Events" --text="No events for $selected_date."
+        else
+            zenity --info --title="Events for $selected_date" --text="Events for $selected_date:\n$events"
+        fi
+    fi
+}
+add_event_to_calendar() {
+    event_details=$(zenity --forms --title="Add Event" --text="Enter event details:" \
+                    --add-entry="Title:" --add-calendar="Date:")
+
+    if [ -z "$event_details" ]; then
+        echo "No event details provided. Exiting."
+        exit 1
+    fi
+
+    title=$(echo "$event_details" | cut -d '|' -f1)
+    date=$(echo "$event_details" | cut -d '|' -f2)
+
+    echo "$date-$title" >> "$DATA_FILE"
+    zenity --info --title="Event Added" --text="Event added successfully!"
+}
+
+delete_event_from_calendar() {
+    selected_date=$(zenity --calendar --title="Delete Event" --text="Select a date to delete events:" --date-format="%Y-%m-%d" --width=300 --height=300)
+    if [ -z "$selected_date" ]; then
+        zenity --info --title="No Date Selected" --text="No date selected. Exiting."
+        return 1
+    fi
+    echo "Selected Date: $selected_date"
+
+    converted_date=$(date -d "$selected_date" +"%m/%d/%y")
+
+    events=$(grep "^$converted_date-" "$DATA_FILE")
+
+    if [ -z "$events" ]; then
+        zenity --info --title="No Events" --text="No events for $selected_date."
+        return 1
+    fi
+    selected_event=$(echo "$events" | cut -d'-' -f2 | zenity --list --title="Select Event to Delete" --text="Select an event to delete:" --column="Event")
+    if [ -z "$selected_event" ]; then
+        zenity --info --title="No Event Selected" --text="No event selected. Exiting."
+        return 1
+    fi
+    awk -v pattern="$converted_date-$selected_event" '$0 !~ pattern' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
+    zenity --info --title="Event Deleted" --text="Event deleted successfully!"
+}
+
+main() {
+    while true; do
+            current_date=$(date +%Y-%m-%d)
+        converted_current_date=$(date -d "$current_date" +"%m/%d/%y")
+        current_events=$(grep "$converted_current_date" "$DATA_FILE" | cut -d '-' -f2-)
+        if [ -n "$current_events" ]; then
+            message="Today's Events:\n$current_events"
+        else
+            message="No events today."
+        fi
+
+        choice=$(zenity --list --title="Personalized Calendar and Alarm System" \
+                    --text="$message\n\nChoose an option:" --column="Options" \
+                    "Set Alarm" "Add Event to Calendar" "View Events" "Delete Event" "Exit" --width=400 --height=300)
+        case $choice in
+            "Set Alarm")
+                set_alarm
+                ;;
+            "Add Event to Calendar")
+                add_event_to_calendar
+                ;;
+            "View Events")
+                display_events
+                ;;
+            "Delete Event")
+                delete_event_from_calendar
+                ;;
+            "Exit")
+                exit 0
+                ;;
+            *)
+                echo "Invalid option. Please try again."
+                ;;
+        esac
+    done
+}
+
+main
